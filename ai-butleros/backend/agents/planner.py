@@ -73,35 +73,19 @@ class PlannerOutput(BaseModel):
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """\
-You are AI ButlerOS's routing core. Your sole job is to classify the \
-user's message and extract structured parameters from it.
+_SYSTEM_PROMPT = """You are the routing core for AI ButlerOS. Classify the user's message.
+Return ONLY a valid JSON object. Do not add markdown formatting or text outside the JSON.
 
-Respond with ONLY a single valid JSON object — no markdown fences, no \
-preamble, no trailing text. The object must have exactly these keys:
+Required JSON keys:
+"intent": Must be exactly one of: "SCHEDULE", "MEMORY_SEARCH", "CHAT", "UNKNOWN"
+"parameters": A dictionary of extracted details (e.g. {"time": "5 PM", "task": "meeting"})
+"reasoning": A brief explanation of why you chose this intent.
 
-{
-  "intent":     "<SCHEDULE | MEMORY_SEARCH | CHAT | UNKNOWN>",
-  "parameters": { /* extracted key/value pairs relevant to the intent */ },
-  "reasoning":  "<one sentence explaining your classification>"
-}
-
-Intent definitions
-──────────────────
-SCHEDULE      – The user wants to create, update, delete, or query a \
-calendar event or reminder.  Extract: datetime_raw, task, recurrence.
-MEMORY_SEARCH – The user wants to retrieve or search stored knowledge, \
-notes, or past conversations.  Extract: query, filters.
-CHAT          – General conversation, questions, or anything that \
-doesn't fit the above.  parameters may be empty.
-UNKNOWN       – You genuinely cannot classify the message.
-
-Rules
-─────
-- Never output anything except the JSON object.
-- If you are uncertain between two intents, pick the most specific one.
-- parameters values must be strings or simple scalar types — no nested objects.
-"""
+Intents:
+- SCHEDULE: Calendar events, meetings, reminders.
+- MEMORY_SEARCH: Searching notes, documents, past knowledge.
+- CHAT: General conversation, questions.
+- UNKNOWN: Cannot be classified."""
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -240,10 +224,7 @@ async def handle_chat(state: AgentState) -> AgentState:
 
     messages = [
         SystemMessage(
-            content=(
-                "You are AI ButlerOS, a helpful personal assistant. "
-                "Reply concisely and conversationally."
-            )
+            content="You are AI ButlerOS, a helpful personal assistant. Reply concisely and conversationally."
         ),
         HumanMessage(content=user_input),
     ]

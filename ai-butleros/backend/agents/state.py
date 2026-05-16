@@ -34,5 +34,8 @@ class AgentState(TypedDict, total=False):
     # ── Loop guard ─────────────────────────────────────────────────────────
     retry_count: int
 
+    # Scratch space for passing raw LLM text from analyze_intent to validate_schema.
+    _raw_llm_output: str | None
+
     # ── Terminal output ────────────────────────────────────────────────────
     final_response: str
