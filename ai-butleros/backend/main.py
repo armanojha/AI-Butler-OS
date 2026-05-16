@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from backend.agents.planner import planner_graph
 from backend.core.database import AsyncSessionLocal, close_db, init_db
 from backend.services.log_service import TraceService
 
@@ -42,17 +43,16 @@ async def _process_events(queue: asyncio.Queue[_QueueEvent | None]) -> None:
     """
     Drain the queue indefinitely.
 
-    Each iteration opens its own DB session so a failure in one event
-    never poisons the session state for the next.  The worker absorbs
-    all exceptions to keep the task alive; individual failures are
-    logged at ERROR level so they surface in observability tooling.
+    Each event gets its own DB session and a self-contained try/except so
+    a bad event never poisons the next.  The worker task itself never raises
+    — all exceptions are absorbed and logged at ERROR level.
     """
     logger.info("Background worker started.")
 
     while True:
         event = await queue.get()
 
-        # Poison-pill — clean shutdown requested by lifespan.
+        # Poison-pill — lifespan requests a clean shutdown.
         if event is None:
             logger.info("Background worker received shutdown signal.")
             queue.task_done()
@@ -68,31 +68,54 @@ async def _process_events(queue: asyncio.Queue[_QueueEvent | None]) -> None:
             async with AsyncSessionLocal() as session:
                 svc = TraceService(db=session)
 
-                # ── Trace: processing started ─────────────────────────────
+                # ── Trace 1: processing started ───────────────────────────
                 await svc.create_trace(
-                    trace_id=event.trace_id + "-start",
+                    trace_id=f"{event.trace_id}-start",
                     agent_name="Orchestrator",
                     step_name="processing_started",
                     input_data={"user_input": event.user_input, **event.metadata},
-                    monologue="Event dequeued; beginning orchestration pipeline.",
+                    monologue="Event dequeued; dispatching to PlannerAgent.",
                 )
                 logger.info("Trace START written | trace_id=%s", event.trace_id)
 
-                # ── TODO: dispatch to PlannerAgent (Phase 2) ─────────────
+                # ── Phase 2: invoke the PlannerAgent graph ────────────────
+                graph_result: dict[str, Any] = await planner_graph.ainvoke(
+                    {
+                        "user_input": event.user_input,
+                        "retry_count": 0,
+                    }
+                )
 
-                # ── Trace: processing finished ────────────────────────────
+                intent: str = graph_result.get("intent", "UNKNOWN")
+                parameters: dict[str, Any] = graph_result.get("parameters", {})
+                monologue: str = graph_result.get("monologue", "")
+                final_response: str = graph_result.get("final_response", "")
+                retry_count: int = graph_result.get("retry_count", 0)
+
+                logger.info(
+                    "PlannerAgent finished | intent=%s retries=%d trace_id=%s",
+                    intent,
+                    retry_count,
+                    event.trace_id,
+                )
+
+                # ── Trace 2: processing finished ──────────────────────────
                 await svc.create_trace(
-                    trace_id=event.trace_id + "-end",
-                    agent_name="Orchestrator",
+                    trace_id=f"{event.trace_id}-end",
+                    agent_name="PlannerAgent",
                     step_name="processing_finished",
                     input_data={"user_input": event.user_input},
-                    output_data={"status": "stub_complete"},
-                    monologue="Pipeline stub completed successfully.",
+                    output_data={
+                        "intent": intent,
+                        "parameters": parameters,
+                        "final_response": final_response,
+                        "retry_count": retry_count,
+                    },
+                    monologue=monologue,
                 )
-                logger.info("Trace END written   | trace_id=%s", event.trace_id)
+                logger.info("Trace END written | trace_id=%s", event.trace_id)
 
         except Exception as exc:  # noqa: BLE001
-            # Log and continue — never let a bad event crash the worker.
             logger.exception(
                 "Worker failed to process event | trace_id=%s | error=%s",
                 event.trace_id,
@@ -122,7 +145,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("ButlerOS shutdown sequence initiated.")
     await _event_queue.put(None)           # send poison-pill
-    await asyncio.wait_for(worker_task, timeout=15.0)
+    await asyncio.wait_for(worker_task, timeout=30.0)  # increased for LLM latency
     await close_db()
     logger.info("ButlerOS shutdown complete.")
 
@@ -131,8 +154,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="AI ButlerOS",
-    version="0.1.0",
-    description="Local-first personal orchestration assistant.",
+    version="0.2.0",
+    description="Local-first personal orchestration assistant — Phase 2.",
     lifespan=lifespan,
 )
 
@@ -173,8 +196,9 @@ async def interact(body: InteractRequest) -> InteractResponse:
     """
     Enqueue a user message for the background worker.
 
-    Returns immediately with a ``trace_id`` the client can use to poll
-    for results once the SchedulerAgent and MemoryAgent are wired up.
+    Returns immediately with a ``trace_id``.  The PlannerAgent processes
+    the event asynchronously; the final state is persisted to SQLite and
+    will be queryable via the trace endpoint in Phase 3.
     """
     trace_id = str(uuid.uuid4())
 

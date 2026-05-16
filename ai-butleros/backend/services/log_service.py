@@ -36,7 +36,7 @@ class TraceService:
         trace_id: str | None = None,
     ) -> ExecutionTrace:
         """
-        Persist a single trace row and return the committed ORM object.
+        Persist a single trace row and return the flushed ORM object.
 
         Parameters
         ----------
@@ -46,8 +46,8 @@ class TraceService:
         output_data: Arbitrary JSON-serialisable output payload.
         monologue:   Free-form LLM chain-of-thought text.
         trace_id:    Caller-supplied UUID string; generated if omitted.
-                     Passing the same ID for "start" and "end" traces
-                     lets us correlate a full processing run.
+                     Passing caller-derived IDs lets us correlate a
+                     full processing run.
         """
         record = ExecutionTrace(
             id=trace_id or str(uuid.uuid4()),
@@ -59,11 +59,10 @@ class TraceService:
         )
 
         self._db.add(record)
-        await self._db.flush()   # assigns DB defaults; session still open
-        await self._db.commit()
+        await self._db.flush()   # assigns DB defaults; caller commits
 
         logger.debug(
-            "Trace persisted | id=%s agent=%s step=%s",
+            "Trace staged | id=%s agent=%s step=%s",
             record.id,
             record.agent_name,
             record.step_name,

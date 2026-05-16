@@ -33,7 +33,7 @@ class ExecutionTrace(Base):
 
     # ── Identity ────────────────────────────────────────────────────────────
     id: Mapped[str] = mapped_column(
-        String(36),
+        String(64),
         primary_key=True,
         default=_new_uuid,
         index=True,
