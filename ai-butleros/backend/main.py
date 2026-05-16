@@ -114,6 +114,7 @@ async def _process_events(queue: asyncio.Queue[_QueueEvent | None]) -> None:
                     monologue=monologue,
                 )
                 logger.info("Trace END written | trace_id=%s", event.trace_id)
+                await session.commit()
 
         except Exception as exc:  # noqa: BLE001
             logger.exception(
