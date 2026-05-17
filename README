@@ -1,0 +1,61 @@
+# AI ButlerOS — Phase 1: Foundation
+
+## Structure
+
+```
+ai-butleros/
+├── backend/
+│   ├── __init__.py
+│   ├── main.py                  # FastAPI app, lifespan, event queue, routes
+│   ├── core/
+│   │   ├── __init__.py
+│   │   └── database.py          # Async SQLAlchemy engine + get_db dep
+│   ├── domain/
+│   │   ├── __init__.py
+│   │   └── models.py            # ExecutionTrace ORM model
+│   └── services/
+│       ├── __init__.py
+│       └── log_service.py       # TraceService.create_trace()
+├── data/                        # Auto-created; holds butler.db
+└── requirements.txt
+```
+
+## Run
+
+```bash
+pip install -r requirements.txt
+
+# From repo root so `backend.*` imports resolve correctly
+uvicorn backend.main:app --reload --port 8000
+```
+
+## Smoke test
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/interact \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Remind me to review the LangGraph PR tomorrow at 9am"}' | jq
+
+# Expected:
+# { "status": "queued", "trace_id": "<uuid>" }
+```
+
+Console output (within ~1 ms):
+```
+INFO | butleros | Event enqueued | trace_id=<uuid>
+INFO | butleros | Worker picked up event | trace_id=<uuid> ...
+INFO | butleros | Trace START written | trace_id=<uuid>
+INFO | butleros | Trace END written   | trace_id=<uuid>
+```
+
+Two rows appear in `data/butler.db → execution_traces` with `step_name`
+values `processing_started` and `processing_finished`.
+
+## Architectural notes
+
+| Decision | Rationale |
+|---|---|
+| `asyncio.Queue` (unbounded by default) | No back-pressure needed in single-user mode. Add `maxsize=` if you want to surface 503s under load. |
+| Session-per-event in worker | Prevents a DB error in event N from corrupting the session for event N+1. |
+| Poison-pill (`None`) for shutdown | Avoids `task.cancel()` + `CancelledError` gymnastics; graceful drain with `asyncio.wait_for` timeout. |
+| `trace_id + "-start"` / `"-end"` suffix | Keeps correlating start/end pairs trivially queryable (`WHERE id LIKE '<uuid>%'`) without a separate FK column at this stage. |

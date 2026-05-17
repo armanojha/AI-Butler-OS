@@ -1,8 +1,18 @@
-# requirements.txt  — Phase 1 (Foundation)
+# requirements.txt  — Phase 3 (MemoryAgent + RAG)
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 sqlalchemy==2.0.30
 aiosqlite==0.20.0
-pydantic==2.7.1
+pydantic==2.13.4
 pydantic-settings==2.2.1
+
+# ── Phase 2 ────────────────────────────────────────────────────────────────────
+langgraph==1.2.0
+langchain-core==1.4.0
+langchain-ollama==1.1.0
+
+# ── Phase 3 ────────────────────────────────────────────────────────────────────
+chromadb==0.5.3
+pypdf==4.2.0
+langchain-text-splitters==1.1.2
  
