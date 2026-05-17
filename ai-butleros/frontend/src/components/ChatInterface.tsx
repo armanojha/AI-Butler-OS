@@ -3,7 +3,7 @@
 // src/components/ChatInterface.tsx
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Brain, ChevronDown, ChevronRight, Loader2, Send } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, Loader2, Mic, MicOff, Send } from "lucide-react";
 import { interact, pollTrace, TraceRow } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -151,6 +151,141 @@ export default function ChatInterface() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Voice state ───────────────────────────────────────────────────────────
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
+  /**
+   * Whether the current browser exposes any SpeechRecognition constructor.
+   * Evaluated lazily so SSR never touches `window`.
+   */
+  const sttSupported =
+    typeof window !== "undefined" &&
+    ("SpeechRecognition" in window || "webkitSpeechRecognition" in window);
+
+  const ttsSupported =
+    typeof window !== "undefined" && "speechSynthesis" in window;
+
+  /**
+   * Speak `text` via the Web Speech API.
+   *
+   * Voice-selection strategy (in priority order):
+   *   1. Microsoft voices  (Edge / Windows — highest quality)
+   *   2. Google voices     (Chrome on macOS / Linux)
+   *   3. Any `en` voice    (Safari, Firefox, etc.)
+   *   4. Browser default   (no preference, still speaks)
+   *
+   * We wait for `voiceschanged` because Chrome loads voices asynchronously
+   * and `getVoices()` returns [] on the first synchronous call.
+   */
+  const speak = useCallback(
+    (text: string) => {
+      if (!ttsSupported) return;
+
+      // Cancel any in-flight utterance so a rapid new response doesn't queue.
+      window.speechSynthesis.cancel();
+
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 1.0;
+      utter.pitch = 1.0;
+
+      const selectVoiceAndSpeak = () => {
+        const voices = window.speechSynthesis.getVoices();
+
+        const preferred =
+          voices.find((v) => /microsoft/i.test(v.name) && v.lang.startsWith("en")) ??
+          voices.find((v) => /google/i.test(v.name) && v.lang.startsWith("en")) ??
+          voices.find((v) => v.lang.startsWith("en")) ??
+          null;
+
+        if (preferred) utter.voice = preferred;
+        window.speechSynthesis.speak(utter);
+      };
+
+      // Voices already loaded (Firefox, Edge, cached Chrome)
+      if (window.speechSynthesis.getVoices().length > 0) {
+        selectVoiceAndSpeak();
+      } else {
+        // Chrome: wait for the async voices-loaded event, then speak once.
+        const onVoicesChanged = () => {
+          window.speechSynthesis.removeEventListener("voiceschanged", onVoicesChanged);
+          selectVoiceAndSpeak();
+        };
+        window.speechSynthesis.addEventListener("voiceschanged", onVoicesChanged);
+      }
+    },
+    [ttsSupported]
+  );
+
+  /**
+   * Toggle microphone listening.
+   *
+   * `continuous: false`  — fires `onresult` after a natural pause, which is
+   *   the right UX for command-style input (vs. dictation mode).
+   * `interimResults: true` — updates the textarea in real time so the user
+   *   sees words appearing as they speak, not just after they stop.
+   */
+  const toggleListening = useCallback(() => {
+    if (!sttSupported) return;
+
+    if (listening) {
+      recognitionRef.current?.stop();
+      setListening(false);
+      return;
+    }
+
+    // Stop any active TTS so the mic doesn't pick up the butler's voice.
+    if (ttsSupported) window.speechSynthesis.cancel();
+
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition ??
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionCtor) return;
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = "en-US";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+
+    // Track the stable (final) transcript prefix so interim results
+    // don't duplicate already-committed words.
+    let committedTranscript = "";
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          committedTranscript += result[0].transcript;
+        } else {
+          interim += result[0].transcript;
+        }
+      }
+      // Replace only the live-draft portion; preserve whatever the user
+      // had already typed before they clicked the mic.
+      setInput((prev) => {
+        const base = prev.trimEnd();
+        const separator = base.length > 0 ? " " : "";
+        return base + separator + committedTranscript + interim;
+      });
+    };
+
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+      // `no-speech` is benign (user just didn't say anything); don't surface it.
+      if (event.error !== "no-speech") {
+        setError(`Microphone error: ${event.error}`);
+      }
+      setListening(false);
+    };
+
+    recognition.onend = () => setListening(false);
+
+    recognitionRef.current = recognition;
+    recognition.start();
+    setListening(true);
+  }, [listening, sttSupported, ttsSupported]);
+
   // Auto-scroll to bottom on new messages or thought updates
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -209,12 +344,14 @@ export default function ChatInterface() {
             )
           );
           setBusy(false);
+          // ── TTS: read the response aloud ──────────────────────────────
+          speak(finalResponse);
           // Refocus input after completion
           setTimeout(() => inputRef.current?.focus(), 50);
         }
       }, 2000);
     },
-    [stopPolling]
+    [stopPolling, speak]
   );
 
   const handleSubmit = useCallback(async () => {
@@ -286,7 +423,7 @@ export default function ChatInterface() {
           </span>
         </div>
         <span className="ml-auto text-[10px] text-zinc-600 tracking-widest uppercase">
-          v0.4 · local
+          v0.6 · local
         </span>
       </header>
 
@@ -326,8 +463,31 @@ export default function ChatInterface() {
               rows={1}
               disabled={busy}
               className="flex-1 resize-none bg-transparent text-sm text-zinc-100 placeholder:text-zinc-600 outline-none leading-relaxed max-h-40 overflow-y-auto disabled:opacity-40"
-              style={{ field_sizing: "content" } as React.CSSProperties}
+              style={{ fieldSizing: "content" } as React.CSSProperties}
             />
+
+            <button
+              onClick={toggleListening}
+              disabled={busy || !sttSupported}
+              aria-label={listening ? "Stop listening" : "Start voice input"}
+              title={
+                !sttSupported
+                  ? "Speech recognition not supported in this browser"
+                  : listening
+                  ? "Stop listening"
+                  : "Speak your message"
+              }
+              className={[
+                "mb-0.5 shrink-0 flex items-center justify-center h-8 w-8 rounded-xl transition-all",
+                "disabled:opacity-30 disabled:pointer-events-none active:scale-95",
+                listening
+                  ? // Glowing red ring when hot
+                    "bg-red-500/15 border border-red-500/60 text-red-400 shadow-[0_0_10px_2px_rgba(239,68,68,0.3)] animate-pulse"
+                  : "bg-zinc-700/60 text-zinc-400 hover:bg-zinc-600/70 hover:text-zinc-200",
+              ].join(" ")}
+            >
+              {listening ? <MicOff size={14} /> : <Mic size={14} />}
+            </button>
 
             <button
               onClick={handleSubmit}
@@ -344,7 +504,7 @@ export default function ChatInterface() {
           </div>
 
           <p className="mt-2 text-center text-[10px] text-zinc-700 tracking-widest uppercase">
-            Enter to send · Shift+Enter for new line
+            Enter to send · Shift+Enter for new line · Mic for voice
           </p>
         </div>
       </footer>
